@@ -36,7 +36,7 @@ float clamp(float a)
   return a;
 }
 
-size_t global_scratch_size = 10 * 1024;
+size_t global_scratch_size = 32 * 1024;
 uint8_t *global_scratch_buf = NULL;
 
 void setup()
@@ -182,7 +182,7 @@ void recieveUserMessage(int userMessageId)
 void loop()
 {
   int photoValue = analogRead(PHOTORESISTOR_PIN);
-  if (photoValue < 700)
+  if (photoValue > 1300)
   {
     queryParamsSleepEventNew(THIS_USER_ID);
     delay(500);
