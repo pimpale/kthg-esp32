@@ -18,6 +18,8 @@ const int TARGET_USER_ID = 1;
 
 const int MICROPHONE_PIN = 34;
 const int RECORD_BUTTON_PIN = 33;
+const int PLAYBACK_BUTTON_PIN = 26;
+
 const int PHOTORESISTOR_PIN = 32;
 const int SPEAKER_PIN = 25;
 
@@ -34,82 +36,19 @@ float clamp(float a)
   return a;
 }
 
-typedef struct {
-  uint8_t buf[4096];
-  size_t read;
-  size_t write; 
-} CircularBuffer;
-
-bool cbFull(volatile CircularBuffer *x) {
-  return x->write + 1 == x->read;
-}
-bool cbEmpty(volatile CircularBuffer *x) {
-  return x->read == x->write;
-}
-
-
-void cbReset(volatile CircularBuffer *x) {
-  x->write = 0;
-  x->read = 0;
-}
-
-bool cbTryIns(volatile CircularBuffer *x, uint8_t val) {
-  if(cbFull(x)) {
-    return false;
-  }
-  x->buf[x->write] = val;
-  x->write = (x->write+1) % sizeof(x->buf); 
-  return true;
-}
-
-bool cbTryPop(volatile CircularBuffer *x, uint8_t *val) {
-  if(cbEmpty(x)) {
-    return false;
-  }
-  *val = x->buf[x->read];
-  x->read = (x->read+1) % sizeof(x->buf); 
-  return true;
-} 
-
-volatile bool global_submit_active = false;
-volatile CircularBuffer global_submit_queue;
-
-volatile bool global_receive_active = false;
-volatile CircularBuffer global_receive_queue;
-
+size_t global_scratch_size = 10 * 1024;
+uint8_t *global_scratch_buf = NULL;
 
 void setup()
 {
   Serial.begin(9600);
 
+  global_scratch_buf = new uint8_t[global_scratch_size];
+
   connectWiFi();
 
   pinMode(RECORD_BUTTON_PIN, INPUT);
-}
-
-void recordUserMessage(void*) {
-  while(global_submit_active) {
-    float temp =  analogRead(MICROPHONE_PIN);
-    uint8_t val = uint8_t(clamp((temp - 1000) / 2500) * 255);
-    bool success = cbTryIns(&global_submit_queue, val);
-    if(!success) {
-      Serial.println("BRUH");
-    }
-    delayMicroseconds(50);
-  }
-  vTaskDelete(NULL);
-}
-
-void playUserMessage(void*) {
-  while(global_receive_active) {
-    uint8_t val;
-    boolean success = cbTryPop(&global_submit_queue, &val);
-    if(success) {
-      dacWrite(25, val);
-    }
-    delayMicroseconds(1000);
-  }
-  vTaskDelete( NULL );
+  pinMode(PLAYBACK_BUTTON_PIN, INPUT);
 }
 
 void submitUserMessage()
@@ -128,40 +67,25 @@ void submitUserMessage()
     return;
   }
   Serial.println("SubmitUserMessage: Connected!");
-  
-  // reset queue
-  cbReset(&global_submit_queue);
-  global_submit_active = true;
-  // start recording
-  xTaskCreatePinnedToCore (
-    recordUserMessage,     // Function to implement the task
-    "recordUserMessage",   // Name of the task
-    1000,      // Stack size in bytes
-    NULL,      // Task input parameter
-    0,         // Priority of the task
-    NULL,      // Task handle.
-    0          // Core where the task should run
-  );
-  
   while (digitalRead(RECORD_BUTTON_PIN) == 1)
   {
-    uint8_t buf[1024];
-    for(int i = 0; i < sizeof(buf); i++) {
-      uint8_t element;
-      while(!cbTryPop(&global_submit_queue, &element)) {
-        delayMicroseconds(10);
+    int i;
+    for (i = 0; i < global_scratch_size && digitalRead(RECORD_BUTTON_PIN) == 1; i++)
+    {
+      {
+        float temp = analogRead(MICROPHONE_PIN);
+        uint8_t val = uint8_t(clamp((temp - 1000) / 2500) * 255);
+        global_scratch_buf[i] = val;
+        delayMicroseconds(50);
       }
-      buf[i] = element;
     }
-    // send the current buffer
-    boolean successful = client.sendBinary((const char *)buf, sizeof(buf));
+    boolean successful = client.sendBinary((const char *)global_scratch_buf, i);
     if (!successful)
     {
       Serial.println("SubmitUserData: encountered error");
       break;
     }
   }
-  global_submit_active = false;
   Serial.println("SubmitUserData: stopped sending data");
   client.close();
 }
@@ -193,6 +117,26 @@ int getRecentUserMessageId(int targetUserId)
   return atoi(respTxt.c_str());
 }
 
+void queryParamsSleepEventNew(int creatorUserId)
+{
+  char pathbuf[PATHBUFLEN];
+  sprintf(pathbuf, "/public/query_params_sleep_event_new?creatorUserId=%d", creatorUserId);
+
+  HTTPClient http;
+
+  http.begin(server_host, server_port, pathbuf);
+  http.addHeader("Accept", "*/*");
+
+  // Send HTTP GET request
+  int httpResponseCode = http.GET();
+
+  Serial.print("SleepEventNew: Got code: ");
+  Serial.println(httpResponseCode);
+  String respTxt = http.getString();
+  Serial.print("SleepEventNew: received: ");
+  Serial.println(respTxt);
+}
+
 void recieveUserMessage(int userMessageId)
 {
   // buffer for the path and query
@@ -209,19 +153,6 @@ void recieveUserMessage(int userMessageId)
     return;
   }
 
-  // reset queue
-  cbReset(&global_receive_queue);
-  global_receive_active = true;
-  xTaskCreatePinnedToCore (
-    playUserMessage,     // Function to implement the task
-    "playUserMessage",   // Name of the task
-    1000,      // Stack size in bytes
-    NULL,      // Task input parameter
-    0,         // Priority of the task
-    NULL,      // Task handle.
-    0          // Core where the task should run
-  );
-
   int count = 0;
 
   while (client.available())
@@ -237,21 +168,27 @@ void recieveUserMessage(int userMessageId)
       const char *data = msg.data().c_str();
       for (int i = 0; i < len; i++)
       {
-        while(!cbTryIns(&global_submit_queue, data[i])) {
-          delayMicroseconds(10);
-        }
+        dacWrite(25, data[i]);
+        delayMicroseconds(130);
       }
     }
   }
-  global_receive_active = false;
   Serial.println("ReceiveUserData: exiting");
   client.close();
 }
+
+
 
 void loop()
 {
   int photoValue = analogRead(PHOTORESISTOR_PIN);
   if (photoValue < 700)
+  {
+    queryParamsSleepEventNew(THIS_USER_ID);
+    delay(500);
+  }
+
+  if (digitalRead(PLAYBACK_BUTTON_PIN) == 1)
   {
     recieveUserMessage(getRecentUserMessageId(THIS_USER_ID));
   }
