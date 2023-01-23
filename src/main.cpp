@@ -4,6 +4,7 @@
 
 // wifi
 #include "wifi_setup.hpp"
+#include "SoundData.h"
 
 using namespace websockets;
 
@@ -36,7 +37,7 @@ float clamp(float a)
   return a;
 }
 
-size_t global_scratch_size = 32 * 1024;
+size_t global_scratch_size = 10 * 1024;
 uint8_t *global_scratch_buf = NULL;
 
 void setup()
@@ -74,7 +75,7 @@ void submitUserMessage()
     {
       {
         float temp = analogRead(MICROPHONE_PIN);
-        uint8_t val = uint8_t(clamp((temp - 1000) / 2500) * 255);
+        uint8_t val = uint8_t(clamp((temp - 1000) / 3000) * 255);
         global_scratch_buf[i] = val;
         delayMicroseconds(50);
       }
@@ -177,13 +178,17 @@ void recieveUserMessage(int userMessageId)
   client.close();
 }
 
-
-
 void loop()
 {
   int photoValue = analogRead(PHOTORESISTOR_PIN);
   if (photoValue > 1300)
   {
+    for (int i = 0; i < sizeof(sample); i++)
+    {
+      dacWrite(25, sample[i]);
+      delayMicroseconds(130);
+    }
+
     queryParamsSleepEventNew(THIS_USER_ID);
     delay(500);
   }
